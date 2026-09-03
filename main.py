@@ -696,7 +696,7 @@ def main() -> None:
     _print_search_window_tradeoff(cfg)
 
     # 2: Konventioneller Überblick
-    # run_2_conventional(cfg)
+    run_2_conventional(cfg)
 
     # 3: Train/Val/Test-Protokoll für LSTM & SNN
     run_3_protocol(cfg)
@@ -705,7 +705,7 @@ def main() -> None:
     run_4_metrics(cfg)
 
     # 5: Zusammenfassung
-    # run_6_summary(cfg)
+    run_6_summary(cfg)
 
     elapsed = time.perf_counter() - t0
     print(f"\n{'═' * 70}")
