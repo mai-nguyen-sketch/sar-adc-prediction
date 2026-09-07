@@ -164,7 +164,7 @@ class ExperimentRunner:
         jitter_rng = np.random.default_rng(seed + 1_000_000)
         signal_kwargs = _jitter_signal_kwargs(config.signal_kwargs, jitter_rng, config.jitter_frac)
         x = generator.generate(config.signal_type, config.n_samples, **signal_kwargs)
-
+        x = x * config.sar_config.v_ref  # von normiert [0,1] auf tatsächlichen Spannungsbereich [0, v_ref] skalieren
         # Prädiktor instanziieren
         rng = np.random.default_rng(seed)
         try:
