@@ -10,7 +10,7 @@ entsprechen:
     1  – Globale Konfiguration           (SARConfig, SplitConfig)
     2  – Konventioneller Vergleich        (Kapitel 4.2 / 5.1-5.3)
     3  – Trainings-/Testprotokoll für     (Kapitel 4.4 / 5.2)
-               neuromorphe Prädiktoren (LSTM, SNN)
+               neuromorphe Prädiktoren (DNN, SNN)
     4  – Vollständige Metrikauswertung    (Kapitel 4.5 / 5.3-5.5)
                (konventionell + neuromorph)
     5  – SNN-Architekturvergleich:        (Kapitel 4.6 / 5.3)
@@ -22,7 +22,6 @@ Modulstruktur:
     simulation.py        → Signalgenerierung, Experiment-Runner   (Kap. 4.2)
     predictors.py         → Konventionelle Prädiktoren             (Kap. 4.3.1-4.3.5)
     snn_predictor.py      → SNN-Prädiktor (snnTorch, LIF)           (Kap. 4.3.7)
-    snn_benchmark.py      → SNN-Architektur-/Surrogate-Benchmark    (Kap. 4.6)
     protocol.py            → Train/Val/Test-Protokoll                (Kap. 4.4)
     metrics.py             → Bewertungsmetriken                      (Kap. 4.5)
 
@@ -88,7 +87,7 @@ from metrics import (
 # Neuromorphe Prädiktoren (Kapitel 4.3.6 / 4.3.7)
 from snn_predictor import SnnTorchPredictor
 
-# DNN-Prädiktor (LSTM-Backbone, ReLU, AdamW, GroupNorm) mit Multi-Feature-
+# DNN-Prädiktor (GRU-Backbone, ReLU, AdamW, GroupNorm) mit Multi-Feature-
 # Eingabe (Absolutwerte + Deltas) — zusätzliche neuromorphe Vergleichsbasis
 from dnn_predictor import DnnTorchPredictor
 
@@ -113,66 +112,37 @@ def _print_table(headers: list[str], rows: list[list], col_widths: list[int]) ->
     print("─" * len(header_line))
     for row in rows:
         print(fmt.format(*[str(v) for v in row]))
-'''
-# Komplexitätsprofile für die neuromorphen Prädiktoren (Kapitel 2.5.3 / 4.6)
-# metrics.py stellt für die konventionellen Prädiktoren fertige complexity_profile_*()-Funktionen bereit. Für LSTM und SNN existieren keine Referenzimplementierungen in der Literatur mit fixer Gatterzahl, daher werden die Operationszahlen hier aus der jeweiligen Architektur
-def _complexity_profile_lstm(L: int, H1: int, H2: int) -> ComplexityProfile:
-    """
-    Zweischichtiger Stacked-LSTM (Kapitel 4.3.6): pro Zelle vier Gates (Input, Forget, Cell, Output), jedes Gate benötigt (n_in + H) MAC-
-    Operationen plus Bias. Nichtlineare Operationen: 3 Sigmoid- + 1 Tanh-Aktivierung pro Gate-Satz, zzgl. Tanh der Zellzustands-Ausgabe
-    """
-    def cell_params(n_in: int, H: int) -> int:
-        return 4 * H * (n_in + H) + 4 * H
-
-    p1 = cell_params(L, H1)
-    p2 = cell_params(H1, H2)
-    p_head = H2 + 1  # linearer Ausgabekopf
-    params = p1 + p2 + p_head
-
-    return ComplexityProfile(
-        name="LSTM (2-schichtig)",
-        multiplications=params,          # MAC-Operationen ≈ Anzahl Gewichte
-        additions=params,                # Akkumulation + Zustandskombination
-        comparisons=0,
-        nonlinear_ops=4 * (H1 + H2) + (H1 + H2),  # Gate-Aktivierungen + Zustands-Tanh
-        parameters=params,
-        state_size=2 * (H1 + H2),        # h & c je Schicht
-    )
-'''
 
 def _complexity_profile_dnn(L: int, H1: int, H2: int, num_groups: int = 4) -> ComplexityProfile:
     """
-    DNN mit LSTM-Backbone (Kap. 4.3.x, dnn_predictor.py): eine LSTM-Schicht verarbeitet pro Zeitschritt 2 Eingabe-Features (Absolutwert + Delta),
-    gefolgt von zwei Dense-Schichten mit GroupNorm + ReLU. Die Gate-Zählung der LSTM-Zelle erfolgt analog zu _complexity_profile_lstm(), jedoch mit
-    fixer Eingangsdimension 2 (statt L) pro Zeitschritt, da die Sequenz zeitlich statt feature-seitig aufgefächert wird. GroupNorm trägt pro
+    DNN mit GRU-Backbone (Kap. 4.3.x, dnn_predictor.py): eine GRU-Schicht verarbeitet pro Zeitschritt 2 Eingabe-Features (Absolutwert + Delta),
+    gefolgt von zwei Dense-Schichten mit GroupNorm + ReLU. Die Gate-Zählung der GRU-Zelle erfolgt mit fixer Eingangsdimension 2 (statt L) pro Zeitschritt, da die Sequenz zeitlich statt feature-seitig aufgefächert wird. GroupNorm trägt pro
     Kanal zwei zusätzliche affine Parameter (Skalierung + Offset) bei.
     """
     def cell_params(n_in: int, H: int) -> int:
         return 3 * H * (n_in + H) + 3 * H
 
-    p_lstm = cell_params(2, H1)     # LSTM: Input [x_t, delta_x_t] pro Zeitschritt
+    p_gru = cell_params(2, H1)     # GRU: Input [x_t, delta_x_t] pro Zeitschritt
     p_fc2  = H1 * H2 + H2                # Dense-Schicht H1 -> H2
     p_head = H2 + 1                      # linearer Ausgabekopf
     p_norm = 2 * H1 + 2 * H2             # GroupNorm-Affinparameter (norm1 + norm2)
-    params = p_lstm + p_fc2 + p_head + p_norm
+    params = p_gru + p_fc2 + p_head + p_norm
 
     return ComplexityProfile(
         name="DNN (Eigen)",
-        multiplications= p_lstm + p_fc2 + p_head,   # MAC-Operationen ≈ Gewichte (ohne Norm)
-        additions= p_lstm + p_fc2 + p_head,
+        multiplications= p_gru + p_fc2 + p_head,   # MAC-Operationen ≈ Gewichte (ohne Norm)
+        additions= p_gru + p_fc2 + p_head,
         comparisons=0,
-        nonlinear_ops= 5 * H1 + H1 + H2,  # LSTM-Gate-Aktiv: (3 Sigmoid+Tanh+Zustands-Tanh) + 2x ReLU
+        nonlinear_ops= 5 * H1 + H1 + H2,
         parameters=params,
-        state_size= 2 * H1,               # h & c der LSTM-Schicht
+        state_size= H1,               # h & c der GRU-Schicht
     )
 
 
 def _complexity_profile_snn(L: int, H1: int, H2: int, n_steps: int) -> ComplexityProfile:
     """
-    Zweischichtiges SNN mit LIF-Neuronen (Kapitel 4.3.7): pro Zeitschritt
-    ein vollständiger Forward-Pass durch beide FC-Schichten, die
-    Spike-Erzeugung erfolgt über einen Schwellenvergleich (Comparator)
-    statt einer stetigen Aktivierungsfunktion
+    Zweischichtiges SNN mit LIF-Neuronen (Kapitel 4.3.7): pro Zeitschritt ein vollständiger Forward-Pass durch beide FC-Schichten,
+    die Spike-Erzeugung erfolgt über einen Schwellenvergleich (Comparator) statt einer stetigen Aktivierungsfunktion
     """
     p1 = L * H1 + H1
     p2 = H1 * H2 + H2
@@ -191,8 +161,8 @@ def _complexity_profile_snn(L: int, H1: int, H2: int, n_steps: int) -> Complexit
 
 
 # Hilfsfunktion: Klassische vs. vortrainierte (neuromorphe) Prädiktoren
-# Klassische Prädiktoren (Nullordnung, AR, DPCM, ...) benötigen keine Trainingsphase und werden auf der vollständigen Sequenz ausgewertet.
-# LSTM/SNN müssen dagegen zunächst per train_offline() auf dem Trainings-/Validierungsanteil trainiert werden (Kapitel 4.4) und werden anschließend ausschließlich auf dem Testanteil bewertet, um Datenlecks (Train/Test-Leakage) zu vermeiden.
+# Klassische Prädiktoren (Nullordnung, AR, DPCM, ...) benötigen keine Trainingsphase und werden auf der vollständigen Sequenz ausgewertet
+# DNN/SNN müssen dagegen zunächst per train_offline() auf dem Trainings-/Validierungsanteil trainiert werden (Kapitel 4.4) und werden anschließend ausschließlich auf dem Testanteil bewertet, um Datenlecks (Train/Test-Leakage) zu vermeiden
 
 def _evaluate_predictor(factory, x, sar_cfg, split_config, seed):
     try:
@@ -216,19 +186,15 @@ def _evaluate_predictor(factory, x, sar_cfg, split_config, seed):
 
 def _print_search_window_tradeoff(cfg: dict) -> None:
     """
-    Macht die Kompromiss-Rechnung aus Punkt 1/2 sichtbar: zeigt für jedes
-    verwendete max_search_bits (globaler Default + prädiktorspezifische
-    Overrides), wie sich die erwartete mittlere Zyklenzahl in Abhängigkeit
-    von der Trefferquote verhält. Nützlich, um VOR einem vollen Simulations-
-    lauf abzuschätzen, ob ein breiteres Fenster für die gemessene/erwartete
-    Trefferquote eines Prädiktors überhaupt einen Nettovorteil bringt.
+    zeigt für jedes verwendete max_search_bits (globaler Default + prädiktorspezifische Overrides),
+    wie sich die erwartete mittlere Zyklenzahl in Abhängigkeit von der Trefferquote verhält. Nützlich, um VOR einem vollen Simulationslauf abzuschätzen,
+    ob ein breiteres Fenster für die gemessene/erwartete Trefferquote eines Prädiktors überhaupt einen Nettovorteil bringt.
     """
     _section("Kompromiss-Rechnung: Suchfenster vs. Trefferquote")
     n_bits = cfg["sar_config"].n_bits
     neural = cfg["neural"]
     windows = {
         "Global (klassisch)": cfg["sar_config"].max_search_bits,
-        # "LSTM": neural.get("max_search_bits_lstm", cfg["sar_config"].max_search_bits),
         "DNN": neural.get("max_search_bits_dnn", cfg["sar_config"].max_search_bits),
         "SNN": neural.get("max_search_bits_snn", cfg["sar_config"].max_search_bits),
     }
@@ -249,50 +215,33 @@ def _print_search_window_tradeoff(cfg: dict) -> None:
 # Globale Konfiguration
 def build_global_config(args: argparse.Namespace) -> dict:
     """
-    Legt alle globalen Simulationsparameter fest, die in den nachfolgenden Phasen konsistent verwendet werden. Anpassungen an diesen Werten
-    genügen, um die gesamte Simulation konsistent neu zu konfigurieren — kein Parameter ist hartcodiert in den einzelnen Phasen.
+    Legt alle globalen Simulationsparameter fest, die in den nachfolgenden Phasen konsistent verwendet werden. Anpassungen an diesen Werten genügen,
+    um die gesamte Simulation konsistent neu zu konfigurieren — kein Parameter ist hartcodiert in den einzelnen Phasen.
     """
     quick = args.quick
 
     # Hyperparameter der neuromorphen Prädiktoren (Kap. 4.3.6/4.3.7)
     neural = {
-        "L": 24, # 24 bei ULP, 48 bei HP
-        "H1": 12, # 12 bei ULP, 64 bei HP
-        "H2": 8 , # 8 bei ULP, 32 bei HP
-        "n_epochs": 15, # 15 bei ULP, 60 bei HP
-        "patience": 10, # 10 bei ULP, 25 bei HP
-        "n_steps":  6,      # Zeitschritte des SNN-Forward-Passes, 6 bei ULP, 16 bei HP
+        "L": 48, # 24 bei ULP, 48 bei HP
+        "H1": 64, # 12 bei ULP, 64 bei HP
+        "H2": 32, # 8 bei ULP, 32 bei HP
+        "n_epochs": 60, # 15 bei ULP, 60 bei HP
+        "patience": 25, # 10 bei ULP, 25 bei HP
+        "n_steps":  16,      # Zeitschritte des SNN-Forward-Passes, 6 bei ULP, 16 bei HP
         "warmup_samples": 20,
         "seed": 0,
-        # Prädiktorspezifische SAR-Suchfenster (Kompromiss-Punkte 1+2):
-        # ein GLOBALES Anheben von SARConfig.max_search_bits würde auch
-        # bereits sehr präzise klassische Prädiktoren (AR(2), Nullordnung)
-        # unnötig verteuern, da jedes zusätzliche Fensterbit einen
-        # zusätzlichen Zyklus PRO TREFFER kostet (siehe
-        # metrics.hit_window_cost()) - unabhängig davon, ob der Prädiktor
-        # das breitere Fenster überhaupt braucht. Stattdessen bekommen nur
-        # die weniger präzisen neuronalen Prädiktoren ein breiteres
-        # Fenster; die SNN etwas breiter als LSTM/DNN, da ihr
-        # Rate-Readout (n_steps Zeitschritte) strukturell nur grob
-        # quantisierte Ausgaben liefert. Der globale SARConfig-Default
-        # bleibt unverändert bei 3, sodass klassische Prädiktoren
-        # unbeeinflusst bleiben (siehe _print_search_window_tradeoff()).
-        # "max_search_bits_lstm": 6,
-        "max_search_bits_dnn": 4, # 6 bei HP, 4 bei ULP
-        "max_search_bits_snn": 5, # 8 bei HP, 5 bei ULP
+        "max_search_bits_dnn": 4, 
+        "max_search_bits_snn": 5,
     }
 
     return {
         # SAR-ADU-Parameter (Kapitel 4.1)
         "sar_config": SARConfig(
-            n_bits=10, # 16 bei HP, 10 bei ULP
-            v_ref=1.0, # 5.0 bei HP, 1.0 bei ULP
+            n_bits=16, # 16 bei HP, 10 bei ULP
+            v_ref=5.0, # 5.0 bei HP, 1.0 bei ULP
             unipolar=True,
-            comparator_noise_std=0.0005 ,#0.0005 bei ULP, 0.00002 bei HP
-            # Globaler Default (gilt für alle Prädiktoren ohne eigenen
-            # max_search_bits-Override, insb. die klassischen Prädiktoren).
-            # Bewusst NICHT global erhöht (Kompromiss-Punkt 1) - siehe
-            # Begründung bei neural["max_search_bits_*"] oben.
+            comparator_noise_std=0.00002 ,#0.0005 bei ULP, 0.00002 bei HP
+            # Globaler Default (gilt für alle Prädiktoren ohne eigenen max_search_bits-Override, insb. die klassischen Prädiktoren).
             max_search_bits=2,
         ),
 
@@ -332,7 +281,6 @@ def build_global_config(args: argparse.Namespace) -> dict:
             "Lineare Präd. AR(2)":    complexity_profile_linear_ar(order=2),
             "DPCM (ord=3)":           complexity_profile_dpcm(order=3),
             "LSB-first":              complexity_profile_lsb_first(),
-            # "LSTM (2-schichtig)":     _complexity_profile_lstm(neural["L"], neural["H1"], neural["H2"]),
             "SNN (2-schichtig, LIF)": _complexity_profile_snn(
                                           neural["L"], neural["H1"], neural["H2"],
                                           neural["n_steps"]),
@@ -364,6 +312,7 @@ def _neural_predictor_registry(neural: dict, sar_cfg: SARConfig) -> dict:
     return {
         "SNN (2-schichtig, LIF)": lambda seed=None: SnnTorchPredictor(
             L=neural["L"], H1=neural["H1"], H2=neural["H2"],
+            n_steps=neural["n_steps"],
             n_epochs=neural["n_epochs"], patience=neural["patience"],
             max_search_bits=neural.get("max_search_bits_snn"),
             n_bits=sar_cfg.n_bits,
@@ -384,8 +333,8 @@ def _neural_predictor_registry(neural: dict, sar_cfg: SARConfig) -> dict:
 # Konventioneller Vergleich (Kapitel 4.2 / 5.1–5.3)
 def run_2_conventional(cfg: dict) -> None:
     """
-    Führt den Basis-Vergleich aus Kapitel 4.2 (simulation.py / ExperimentRunner) für alle konventionellen Prädiktoren über alle
-    Signaltypen aus. Liefert einen schnellen Überblick ohne vollständiges Train/Val/Test-Protokoll — alle Samples fließen in die Metriken ein.
+    Führt den Basis-Vergleich aus Kapitel 4.2 (simulation.py / ExperimentRunner) für alle konventionellen Prädiktoren über alle Signaltypen aus.
+    Liefert einen schnellen Überblick ohne vollständiges Train/Val/Test-Protokoll — alle Samples fließen in die Metriken ein.
     Die neuromorphen Prädiktoren benötigen zwingend eine Trainingsphase und werden daher erst später berücksichtigt.
     """
     _banner("Konventioneller Überblick (alle Samples, kein Split)")
@@ -486,10 +435,9 @@ def run_3_protocol(cfg: dict) -> dict:
 # Vollständige Metrikauswertung (Kapitel 4.5 / 5.3-5.5)
 def run_4_metrics(cfg: dict) -> None:
     """
-    Berechnet für jeden Prädiktor (konventionell + neuromorph) auf jedem Signaltyp den vollständigen FullEvaluationReport (alle drei
-    Metrikgruppen aus Kapitel 2.5), inklusive Prediction Gain (Kapitel 2.5.1.3). Konventionelle Prädiktoren werden auf der
-    gesamten Sequenz bewertet; LSTM/SNN werden zunächst auf dem Train+Val-Anteil trainiert und ausschließlich auf dem Testanteil
-    bewertet (siehe _evaluate_predictor()), um Datenlecks zu vermeiden.
+    Berechnet für jeden Prädiktor (konventionell + neuromorph) auf jedem Signaltyp den vollständigen FullEvaluationReport,
+    inklusive Prediction Gain (Kapitel 2.5.1.3). Konventionelle Prädiktoren werden auf der gesamten Sequenz bewertet
+    DNN/SNN werden zunächst auf dem Train+Val-Anteil trainiert und ausschließlich auf dem Testanteil bewertet (siehe _evaluate_predictor()), um Datenlecks zu vermeiden.
     """
     _banner("Vollständige Metrikauswertung (Kapitel 4.5)")
 
@@ -502,9 +450,7 @@ def run_4_metrics(cfg: dict) -> None:
         **_neural_predictor_registry(cfg["neural"], cfg["sar_config"]),
     }
 
-    # Sammelt alle (Signal × Prädiktor)-Kennzahlen als flache Dict-Liste,
-    # damit sie im Anschluss an visualization.py übergeben werden können
-    # (Plots ergänzen die ASCII-Tabellen, ersetzen sie aber nicht).
+    # Sammelt alle (Signal × Prädiktor)-Kennzahlen als flache Dict-Liste, damit sie im Anschluss an visualization.py übergeben werden können
     plot_rows: list[dict] = []
 
     for sig in cfg["signal_types"]:
@@ -579,13 +525,7 @@ def run_4_metrics(cfg: dict) -> None:
 # Ergebniszusammenfassung (Kapitel 5.1)
 def run_6_summary(cfg: dict) -> None:
     """
-    Druckt eine kompakte Gesamtzusammenfassung der wichtigsten Kennzahlen
-    über alle Signaltypen hinweg: mittlere Zyklenzahl und relative
-    Energieeinsparung (Kapitel 2.5.2) pro Prädiktor (konventionell +
-    neuromorph), gemittelt über alle ausgeführten Signaltypen, als
-    Grundlage für Tabelle 5.1 / 6.3 der Arbeit. Für LSTM/SNN wird dabei
-    wie in 4 nur der Testanteil je Signal gewertet, um
-    Datenlecks zu vermeiden.
+    Druckt eine kompakte Gesamtzusammenfassung der wichtigsten Kennzahlen über alle Signaltypen hinweg
     """
     _banner("Gesamtzusammenfassung (Kapitel 5.1 / 6.3)")
 
@@ -698,7 +638,7 @@ def main() -> None:
     # 2: Konventioneller Überblick
     run_2_conventional(cfg)
 
-    # 3: Train/Val/Test-Protokoll für LSTM & SNN
+    # 3: Train/Val/Test-Protokoll für DNN & SNN
     run_3_protocol(cfg)
 
     # 4: Vollständige Metrikauswertung
