@@ -519,7 +519,7 @@ def run_4_metrics(cfg: dict) -> None:
         print(f"  Plot gespeichert: {p}")
 
 # Ergebniszusammenfassung (Kapitel 5.1)
-def run_6_summary(cfg: dict) -> None:
+def run_5_summary(cfg: dict) -> None:
     """
     Druckt eine kompakte Gesamtzusammenfassung der wichtigsten Kennzahlen über alle Signaltypen hinweg
     """
@@ -641,7 +641,7 @@ def main() -> None:
     run_4_metrics(cfg)
 
     # 5: Zusammenfassung
-    run_6_summary(cfg)
+    run_5_summary(cfg)
 
     elapsed = time.perf_counter() - t0
     print(f"\n{'═' * 70}")
