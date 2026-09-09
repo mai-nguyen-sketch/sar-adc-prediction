@@ -9,7 +9,7 @@ from matplotlib.patches import Patch
 
 FIGURES_DIR = Path("output/figures")
 
-# Farbpalette
+# KORREKTUR: Farbpalette erstellen
 _PALETTE = [
     "#0072B2", "#E69F00", "#009E73", "#D55E00",
     "#CC79A7", "#56B4E9", "#F0E442", "#000000",
