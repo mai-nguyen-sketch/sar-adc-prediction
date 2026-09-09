@@ -13,9 +13,7 @@ entsprechen:
                neuromorphe Prädiktoren (DNN, SNN)
     4  – Vollständige Metrikauswertung    (Kapitel 4.5 / 5.3-5.5)
                (konventionell + neuromorph)
-    5  – SNN-Architekturvergleich:        (Kapitel 4.6 / 5.3)
-               Surrogate-Gradienten × Optimierer
-    6  – Ergebniszusammenfassung          (Kapitel 5.1)
+    5  – Ergebniszusammenfassung          (Kapitel 5.1)
 
 Modulstruktur:
     sar_adc.py          → SAR-ADU-Kernmodell                    (Kap. 4.1)
@@ -34,8 +32,6 @@ Verwendung:
     --signal          Führt nur einen einzelnen Signaltyp aus
                       (sine | multitone | ecg_like | quiescent |
                        random_walk)
-    --no-neuromorphic Überspringt SNN-Architekturbenchmark,
-                      da dieser am rechenintensivsten ist. .
 """
 
 from __future__ import annotations
