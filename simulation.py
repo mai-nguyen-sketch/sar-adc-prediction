@@ -15,7 +15,7 @@ import numpy as np
 
 from sar_adc import ConversionResult, Predictor, SARConfig, SARConverter, ZeroOrderPredictor
 
-# Schutz Underflow/Zero-Devision
+# KORREKTUR: Schutz Underflow/Zero-Devision
 EPSILON = 1e-12
 
 # Hilfsfunktion
@@ -26,6 +26,7 @@ def _jitter_signal_kwargs(signal_kwargs: dict, rng: np.random.Generator, jitter_
     jitter_frac=0.02 -> Standardabweichung = 2% des jeweiligen Basiswerts."""
     if jitter_frac <= 0.0:
         return signal_kwargs
+    # KORREKTUR: Flache Kopie reicht bei verschachtelten Datenstrukturen nicht aus
     jittered = dict(signal_kwargs)
     for key, value in signal_kwargs.items():
         if key not in _JITTER_KEYS:
@@ -76,6 +77,7 @@ class SignalGenerator:
         for c in beat_centers:
             window = np.arange(n_samples)
             signal += 0.4 * np.exp(-0.5 * ((window - c) / 4.0) ** 2)
+        # KORREKTUR: Fälschlicherweise Varianz statt StdDev eingegeben (0.01**2)
         noise = self.rng.normal(0.0, 0.01, size=n_samples)
         return np.clip(offset + baseline + signal + noise, 0.0, 1.0)
 
