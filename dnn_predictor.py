@@ -90,6 +90,7 @@ def _make_windows_residual(x_norm: np.ndarray, L: int, baseline_window: int = 32
     X, Y_true = _make_windows_advanced(x_norm, L)
     baseline = _baseline_series(x_norm, window=baseline_window)
     Y_baseline = baseline[L:]
+    # KORREKTUR: Vorzeichenumkehr beim Residual-Ziel (Baseline - True statt True - Baseline)
     Y_residual = Y_true - Y_baseline
     return X, Y_residual, Y_baseline
 
@@ -123,7 +124,7 @@ class _TorchDNNNet(nn.Module):
         deltas = x[:, self.L:]
         seq = torch.stack([vals, deltas], dim=-1)  # (batch, L, 2)
 
-        # GRU liefert nur h (kein Zellzustand c wie beim LSTM)
+        # KORREKTUR: GRU liefert nur h (kein Zellzustand c wie beim LSTM)
         out, _ = self.gru(seq)
         h_last = out[:, -1, :]  # letzter Zeitschritt -> (batch, H1)
 
@@ -162,6 +163,7 @@ class DnnTorchPredictor(Predictor):
             search_margin_bits: int = 1,
             min_search_bits: int = 2,
             max_search_bits_cap: Optional[int] = None,
+            max_search_bits: Optional[int] = None,
             n_bits: int = 10,
             v_ref: float = 1.0,
             seed: Optional[int] = None,
@@ -191,6 +193,7 @@ class DnnTorchPredictor(Predictor):
         self.n_bits = n_bits
         self.v_ref = v_ref
         self.max_search_bits_cap = max_search_bits_cap if max_search_bits_cap is not None else n_bits // 2
+        self._max_search_bits = max_search_bits
         self._lsb = self.v_ref / (2 ** self.n_bits)
         self._seed = seed
         self._x_min = 0.0
@@ -271,7 +274,7 @@ class DnnTorchPredictor(Predictor):
             """
         if not self.adaptive_search_bits:
             return
-
+        # KORREKTUR: Absolutbetrag abs() vergessen, negative Abweichungen werden fehlerhaft verarbeitet
         err_codes = abs(x_true - x_hat) / self._lsb
         y = float(np.log2(max(err_codes, 1e-6)))
         tau = self.search_percentile / 100.0
@@ -321,6 +324,7 @@ class DnnTorchPredictor(Predictor):
             for start in range(0, len(idx), self.batch_size):
                 batch = idx[start: start + self.batch_size]
                 xb = torch.tensor(X_tr[batch], dtype=torch.float32)
+                # KORREKTUR: Target Y_tr greift unpermutierte Sequenzen ab (X und Y passen nicht mehr zusammen)
                 yb = torch.tensor(Y_tr[batch], dtype=torch.float32)
 
                 self._opt.zero_grad()
