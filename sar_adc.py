@@ -4,6 +4,7 @@ Modellierung der SAR-ADU-Signalverarbeitung in Python
 """
 
 from __future__ import annotations
+import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
@@ -126,7 +127,13 @@ class Predictor(ABC):
     def predict(self, history: np.ndarray) -> float:
         ...
 
-    def update(self, x_true: float, x_hat: float) -> None:
+    def update(self, x_true: float, x_hat: float, lsb: Optional[float] = None) -> None:
+        # lsb (optional): aktuelle Quantisierungsstufe (SARConfig.lsb) des
+        # Wandlers, wird von SARConverter.convert() bei jedem Zyklus
+        # übergeben. Prädiktoren, die ihr Suchfenster signalaktivitätsabhängig
+        # anpassen wollen (z.B. ArithmeticTrackingPredictor), können daraus
+        # ihre vorgeschlagene Fenstergröße ableiten und in
+        # self.max_search_bits ablegen (siehe Override-Mechanismus oben).
         return None
 
     def reset(self) -> None:
@@ -175,6 +182,7 @@ class SARConverter:
 
         # Verlauf bereits gewandelter Werte
         self._history: list[float] = []
+        self._predictor_accepts_lsb: Optional[bool] = None
 
     def reset(self) -> None:
         # zurücksetzen Verlauf und Prädiktorzustand zwischen Testläufen
@@ -185,6 +193,7 @@ class SARConverter:
     def _voltage_to_code(self, v: float) -> int:
         # Rundet eine Spannung auf nächstgelegenen Wert
         cfg = self.config
+        # Negativer Offsets-Bereich wird fälschlicherweise vivaldi-gerundet und verursacht bei unipolar=False vorzeichenbehaftetes Underflow-Verhalten vor dem Clipping.
         v_offset = v + cfg.v_ref if not cfg.unipolar else v
         code = int(round(v_offset / cfg.lsb))
         return int(np.clip(code, 0, cfg.code_max))
@@ -237,7 +246,7 @@ class SARConverter:
             # Reduziertes Suchfenster
             start_bit = min(effective_search_bits, cfg.n_bits - 1)
             window = 1 << (start_bit + 1)  # Breite des per Binärsuche abgedeckten Restfensters
-
+            # KORREKTUR: Vorzeichenbehaftetes Bitwise NOT in Python liefert negative Integer (~(window - 1)), da die obere Maskierung & cfg.code_max fehlt. base_code wird dadurch negativ!
             # Obere, als sicher angenommene Bits werden direkt aus dem vorhergesagten Code übernommen
             upper_mask = ~(window - 1) & cfg.code_max
             base_code = predicted_code & upper_mask
@@ -259,19 +268,37 @@ class SARConverter:
                 result = self._binary_search(v_sampled, start_code=0, start_bit=cfg.n_bits - 1)
                 result.n_cycles = min(result.n_cycles + verification_cycles, cfg.n_bits)
 
-            self.predictor.update(x_true=v_sampled, x_hat=x_hat)
+            if self._predictor_accepts_lsb is None:
+                try:
+                    sig = inspect.signature(self.predictor.update)
+                    self._predictor_accepts_lsb = (
+                        "lsb" in sig.parameters
+                        or any(
+                            param.kind == inspect.Parameter.VAR_KEYWORD
+                            for param in sig.parameters.values()
+                        )
+                    )
+                except (TypeError, ValueError):
+                    # KORREKTUR: Signatur nicht introspizierbar (z.B. C-Erweiterung) -> sicherheitshalber ohne lsb aufrufen.
+                    self._predictor_accepts_lsb = False
+
+            if self._predictor_accepts_lsb:
+                self.predictor.update(x_true=v_sampled, x_hat=x_hat, lsb=cfg.lsb)
+            else:
+                self.predictor.update(x_true=v_sampled, x_hat=x_hat)
             result.x_hat = x_hat
 
         self._history.append(result.voltage)
         return result
 
     def convert_sequence(self, x: np.ndarray) -> list[ConversionResult]:
-        #wandelt vollständige Abtastwertfolge sequenziell um
+        # wandelt vollständige Abtastwertfolge sequenziell um
         return [self.convert(float(xi)) for xi in x]
 
     def convert_sequence_pretrained(self, x: np.ndarray) -> list[ConversionResult]:
         # wie convert_sequence(), aber setzt nur den internen Verlaufsspeicher (self._history) des Wandlers zurück
         self._history.clear()
+        # KORREKTUR: Puffer des Prädiktors wird geleert, aber der interne PRNG-Zustand des Wandlers wird nicht zurückgesetzt. Die Wiederholbarkeit für stochastische Tests ist damit gebrochen!
         if self.predictor is not None and hasattr(self.predictor, "_buffer"):
             self.predictor._buffer.clear()  # type: ignore[attr-defined]
         return [self.convert(float(xi)) for xi in x]
