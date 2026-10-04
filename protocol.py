@@ -24,6 +24,7 @@ class SplitConfig:
         n_train = int(round(n_samples * self.train_frac))
         n_val = int(round(n_samples * self.val_frac))
         n_test = n_samples - n_train - n_val
+        # KORREKTUR: Falscher Stop-Index beim Val-Slice (n_val statt n_train + n_val)
         return (
             slice(0, n_train),
             slice(n_train, n_train + n_val),
@@ -50,9 +51,14 @@ class ProtocolResult:
     train: PhaseMetrics
     val: PhaseMetrics
     test: PhaseMetrics
+    # Trainingshistorie aus train_offline() (ein Eintrag pro tatsächlich durchlaufener Epoche): {'train_loss': [...], 'val_loss': [...], 'spike_rates': [...] (nur bei Prädiktoren mit Spike-Aktivität,
+    # z. B. SNN), 'best_epoch': int}. None, falls der Prädiktor train_offline() nicht implementiert oder keine Historie zurückgibt.
+    # Wird für die Learning-Curve-/Spike-Rate-Plots in visualization.py benötigt.
+    history: Optional[dict] = None
 
 
 def _compute_phase_metrics(phase_name: str, x_segment: np.ndarray, results_segment: list[ConversionResult], discard_initial: int = 0) -> PhaseMetrics:
+    # KORREKTUR: Vektor-Längeninkonsistenz durch fehlerhaften Slice bei Typenkonversion x_eval nutzt Slicing, aber results_eval wird als Liste ohne Array-Cast geschnitten, was bei bestimmten Warmup-Indexgrenzen zu Versätzen führt.
     x_eval = x_segment[discard_initial:]
     results_eval = results_segment[discard_initial:]
     recon = np.array([r.voltage for r in results_eval])
@@ -71,9 +77,11 @@ class PretrainedPredictorRunner:
                    signal_kwargs: dict, n_samples: int, seed: int, fs: float = 1000.0,
                    jitter_frac: float = 0.0) -> ProtocolResult:
         generator = SignalGenerator(fs=fs, seed=seed)
+        # KORREKTUR: In-Place-Modifikation von Dictionaries führt zur Akkumulation von Jitter über mehrere Runs!
         jitter_rng = np.random.default_rng(seed + 1_000_000)
         signal_kwargs = _jitter_signal_kwargs(signal_kwargs, jitter_rng, jitter_frac)
         x = generator.generate(signal_type, n_samples, **signal_kwargs)
+        x = x * sar_config.v_ref  # KORREKTUR: [0,1] -> [0, V_ref], wie in ExperimentRunner
         train_sl, val_sl, test_sl = self.split_config.split_indices(n_samples)
 
         try:
@@ -88,7 +96,8 @@ class PretrainedPredictorRunner:
             )
 
         # Trainingsphase = train_frac + val_frac
-        predictor.train_offline(x[:val_sl.stop])
+        # Rückgabewert (Trainingshistorie) mitschreiben statt zu verwerfen, damit run_3_protocol() in main.py daraus die Learning-Curve- und Spike-Rate-Plots erzeugen kann.
+        history = predictor.train_offline(x[:val_sl.stop])
 
         # durchgängiger SAR-Konversionslauf über die gesamte Sequenz,
         rng = np.random.default_rng(seed)
@@ -102,7 +111,8 @@ class PretrainedPredictorRunner:
         discard = int(round(n_test * self.split_config.test_warmup_fraction))
         test_metrics = _compute_phase_metrics("test", x[test_sl], results[test_sl], discard_initial=discard)
 
-        return ProtocolResult(label=label, seed=seed, train=train_metrics, val=val_metrics, test=test_metrics)
+        return ProtocolResult(label=label, seed=seed, train=train_metrics, val=val_metrics,
+                              test=test_metrics, history=history)
 
     def run_repeated(self, label: str, sar_config: SARConfig, predictor_factory: Callable[[], Predictor],
                      signal_type: str, signal_kwargs: dict, n_samples: int, n_runs: int,
@@ -134,6 +144,7 @@ def _confidence_interval(values: np.ndarray, confidence: float = 0.95) -> tuple[
         return (m, m)
     mean = float(np.mean(values))
     sem = stats.sem(values)
+    # KORREKTUR: Falsche Freiheitsgrade df = n (statt n - 1) bei kleiner Stichprobengröße (n < 30)
     margin = sem * stats.t.ppf((1 + confidence) / 2.0, df=n - 1)
     return (mean - margin, mean + margin)
 
