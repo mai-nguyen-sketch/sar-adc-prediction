@@ -13,7 +13,9 @@ entsprechen:
                neuromorphe Prädiktoren (DNN, SNN)
     4  – Vollständige Metrikauswertung    (Kapitel 4.5 / 5.3-5.5)
                (konventionell + neuromorph)
-    5  – Ergebniszusammenfassung          (Kapitel 5.1)
+    5  – SNN-Architekturvergleich:        (Kapitel 4.6 / 5.3)
+               Surrogate-Gradienten × Optimierer
+    6  – Ergebniszusammenfassung          (Kapitel 5.1)
 
 Modulstruktur:
     sar_adc.py          → SAR-ADU-Kernmodell                    (Kap. 4.1)
@@ -32,7 +34,10 @@ Verwendung:
     --signal          Führt nur einen einzelnen Signaltyp aus
                       (sine | multitone | ecg_like | quiescent |
                        random_walk)
+    --no-neuromorphic Überspringt SNN-Architekturbenchmark,
+                      da dieser am rechenintensivsten ist. .
 """
+# KORREKTUR: Doppelten Punkt am Ende des Modul-Docstrings gelöscht
 
 from __future__ import annotations
 
@@ -64,7 +69,7 @@ from protocol import (
     SplitConfig,
     PretrainedPredictorRunner,
     aggregate_test_results,
-    paired_t_test_cycles,
+    paired_t_test_cycles, _confidence_interval,
 )
 
 from metrics import (
@@ -180,6 +185,42 @@ def _evaluate_predictor(factory, x, sar_cfg, split_config, seed):
     return x[test_sl], results[test_sl]
 
 
+def _extract_run_history(result) -> Optional[list[dict]]:
+    """
+    Wandelt die an ProtocolResult.history hängende Trainingshistorie eines
+    einzelnen Laufs in das von visualization.plot_learning_curves() /
+    plot_spike_rates() erwartete Format um.
+
+    ProtocolResult.history stammt direkt aus dem Rückgabewert von
+    train_offline() (siehe snn_predictor.py / dnn_predictor.py) und hat die
+    Form {'train_loss': [...], 'val_loss': [...], 'spike_rates': [...]
+    (nur SNN), 'best_epoch': int}, mit je einem Eintrag pro tatsächlich
+    durchlaufener Epoche (Listenindex == Epochennummer; kürzer bei Early
+    Stopping). Diese Funktion liest daraus 'val_loss' (und, falls
+    vorhanden, 'spike_rates') aus und baut eine Liste
+    {'epoch': int, 'val_loss': float, 'spike_rate': float | None} --
+    eine pro Epoche.
+
+    Gibt None zurück, wenn keine Historie vorliegt (z. B. weil der
+    verwendete Prädiktor kein train_offline() implementiert oder dessen
+    Rückgabewert None ist).
+    """
+    history = getattr(result, "history", None)
+    if not history or not history.get("val_loss"):
+        return None
+
+    val_loss = history["val_loss"]
+    spike_rates = history.get("spike_rates")  # nur beim SNN vorhanden
+
+    records = []
+    for epoch, vl in enumerate(val_loss):
+        rec = {"epoch": epoch, "val_loss": vl}
+        if spike_rates is not None and epoch < len(spike_rates):
+            rec["spike_rate"] = spike_rates[epoch]
+        records.append(rec)
+    return records
+
+
 def _print_search_window_tradeoff(cfg: dict) -> None:
     """
     zeigt für jedes verwendete max_search_bits (globaler Default + prädiktorspezifische Overrides),
@@ -226,7 +267,7 @@ def build_global_config(args: argparse.Namespace) -> dict:
         "n_steps":  16,      # Zeitschritte des SNN-Forward-Passes, 6 bei ULP, 16 bei HP
         "warmup_samples": 20,
         "seed": 0,
-        "max_search_bits_dnn": 4, 
+        "max_search_bits_dnn": 4,
         "max_search_bits_snn": 5,
     }
 
@@ -310,7 +351,7 @@ def _neural_predictor_registry(neural: dict, sar_cfg: SARConfig) -> dict:
             L=neural["L"], H1=neural["H1"], H2=neural["H2"],
             n_steps=neural["n_steps"],
             n_epochs=neural["n_epochs"], patience=neural["patience"],
-            max_search_bits=neural.get("max_search_bits_snn"),
+            max_search_bits=neural.get("max_search_bits_snn"), # KORREKTUR: Weitergabe von max_search_bits hat gefehlt
             n_bits=sar_cfg.n_bits,
             v_ref=sar_cfg.v_ref,
             seed=neural["seed"] if seed is None else seed,
@@ -341,8 +382,8 @@ def run_2_conventional(cfg: dict) -> None:
 
     for sig in cfg["signal_types"]:
         _section(f"Signal: {sig}")
-        headers = ["Prädiktor", "RMSE", "MAE", "mean cyc.", "E_save [%]"]
-        col_widths = [22, 9, 9, 10, 12]
+        headers = ["Prädiktor", "RMSE", "MAE", "mean cyc.", "95%-KI (cyc.)", "E_save [%]"]
+        col_widths = [22, 9, 9, 10, 18, 12]
         rows = []
 
         for label, factory in predictor_registry.items():
@@ -359,11 +400,14 @@ def run_2_conventional(cfg: dict) -> None:
                 jitter_frac=cfg["jitter_frac"],
             )
             results = runner.run(exp)
+            cyc_vals = np.array([r.mean_cycles for r in results])
             rmse = np.mean([r.rmse for r in results])
-            mae  = np.mean([r.mae  for r in results])
-            cyc  = np.mean([r.mean_cycles for r in results])
+            mae = np.mean([r.mae for r in results])
+            cyc = float(np.mean(cyc_vals))
+            ci_low, ci_high = _confidence_interval(cyc_vals)
             esave = (1.0 - cyc / sar_cfg.n_bits) * 100
-            rows.append([label, f"{rmse:.5f}", f"{mae:.5f}", f"{cyc:.2f}",  f"{esave:.1f}%"])
+            ci_str = f"[{ci_low:.2f}, {ci_high:.2f}]"
+            rows.append([label, f"{rmse:.5f}", f"{mae:.5f}", f"{cyc:.2f}", ci_str, f"{esave:.1f}%"])
         _print_table(headers, rows, col_widths)
 
 # Trainings-/Testprotokoll für neuromorphe Prädiktoren (Kapitel 4.4)
@@ -380,6 +424,13 @@ def run_3_protocol(cfg: dict) -> dict:
     runner  = PretrainedPredictorRunner(split)
     predictor_registry = _neural_predictor_registry(cfg["neural"], cfg["sar_config"])
     all_raw: dict[str, dict[str, list]] = {}  # label → sig → results
+
+    # Sammelstrukturen für die Visualisierung (Learning Curves, Testzyklen-
+    # Balken, t-Test-Forest-Plot), die am Ende dieser Funktion erzeugt werden.
+    histories: dict[str, dict[str, list[list[dict]]]] = {}   # sig -> label -> Läufe
+    testcycles_rows: list[dict] = []                          # für plot_snn_dnn_testcycles
+    ttest_rows: list[dict] = []                                # für plot_ttest_results
+
     for sig in cfg["signal_types"]:
         _section(f"Signal: {sig}")
         headers = ["Prädiktor", "Train cyc.", "Val cyc.", "Test cyc.",
@@ -410,6 +461,20 @@ def run_3_protocol(cfg: dict) -> dict:
                          f"{agg.mean_cycles:.2f}",
                          f"{agg.mean_rmse:.5f}", ci])
 
+            # -- für plot_snn_dnn_testcycles() --
+            testcycles_rows.append({
+                "signal": sig,
+                "predictor": label,
+                "mean_cycles": agg.mean_cycles,
+                "ci_low": agg.ci95_cycles[0],
+                "ci_high": agg.ci95_cycles[1],
+            })
+
+            # -- für plot_learning_curves() / plot_spike_rates() --
+            run_histories = [h for r in results if (h := _extract_run_history(r))]
+            if run_histories:
+                histories.setdefault(sig, {})[label] = run_histories
+
         _print_table(headers, rows, col_widths)
 
     # Signifikanztest: SNN vs. DNN (gepaarter t-Test, Kap. 4.4.4)
@@ -423,8 +488,31 @@ def run_3_protocol(cfg: dict) -> dict:
             t, p = paired_t_test_cycles(res_snn, res_dnn)
             sig_flag = "✓ sign. (p<0.05)" if p < 0.05 else "  nicht sign."
             print(f"  {sig:<14} {t:>+8.3f} {p:>9.4f}  {sig_flag}")
+            ttest_rows.append({"signal": sig, "t_stat": t, "p_value": p})
         except (KeyError, ValueError):
             print(f"  {sig:<14}  – nicht ausgeführt –")
+
+    # Visualisierung: Learning Curves, SNN-vs-DNN-Testzyklen, t-Test-Ergebnisse wird bei jedem Aufruf von main() automatisch mit erzeugt.
+    _section("Visualisierung")
+    if histories:
+        p_lc = viz.plot_learning_curves(histories, filename="03_learning_curves")
+        print(f"  Plot gespeichert: {p_lc}")
+        try:
+            p_spike = viz.plot_spike_rates(histories, filename="03_spike_rate")
+            print(f"  Plot gespeichert: {p_spike}")
+        except ValueError:
+            pass  # kein Prädiktor mit spike_rate in der Historie (z. B. reines DNN)
+    else:
+        print("  [!] Keine Trainingshistorien gefunden – Learning-Curve-Plot übersprungen.")
+        print("      (siehe Docstring von _extract_run_history() für die nötige Anpassung)")
+
+    if testcycles_rows:
+        p_tc = viz.plot_snn_dnn_testcycles(testcycles_rows, filename="03_snn_dnn_testcycles")
+        print(f"  Plot gespeichert: {p_tc}")
+
+    if ttest_rows:
+        p_tt = viz.plot_ttest_results(ttest_rows, filename="03_ttest_forest")
+        print(f"  Plot gespeichert: {p_tt}")
 
     return all_raw
 
@@ -459,6 +547,7 @@ def run_4_metrics(cfg: dict) -> None:
         gen = SignalGenerator(fs=cfg["fs"], seed=cfg["base_seed"])
         x = gen.generate(sig, cfg["n_samples"],
                          **cfg["signal_kwargs"].get(sig, {}))
+        x = x * sar_cfg.v_ref  # KORREKTUR: [0,1] -> [0, V_ref]
 
         for label, factory in predictor_registry.items():
             x_eval, res = _evaluate_predictor(
@@ -519,7 +608,7 @@ def run_4_metrics(cfg: dict) -> None:
         print(f"  Plot gespeichert: {p}")
 
 # Ergebniszusammenfassung (Kapitel 5.1)
-def run_5_summary(cfg: dict) -> None:
+def run_6_summary(cfg: dict) -> None:
     """
     Druckt eine kompakte Gesamtzusammenfassung der wichtigsten Kennzahlen über alle Signaltypen hinweg
     """
@@ -540,6 +629,7 @@ def run_5_summary(cfg: dict) -> None:
         gen = SignalGenerator(fs=cfg["fs"], seed=cfg["base_seed"])
         x   = gen.generate(sig, cfg["n_samples"],
                             **cfg["signal_kwargs"].get(sig, {}))
+        x = x * sar_cfg.v_ref # KORREKTUR
         for label, factory in predictor_registry.items():
             _, res = _evaluate_predictor(
                 factory, x, sar_cfg, split_cfg, seed=cfg["base_seed"])
@@ -608,7 +698,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     t0   = time.perf_counter()
-
+    # KORREKTUR: Ausgabe verschönert
     print("╔══════════════════════════════════════════════════════════════════╗")
     print("║  SAR-ADU Prädiktionsalgorithmen – Vgl. konv. & neurom. Verfahren ║")
     print("╚══════════════════════════════════════════════════════════════════╝")
@@ -641,7 +731,7 @@ def main() -> None:
     run_4_metrics(cfg)
 
     # 5: Zusammenfassung
-    run_5_summary(cfg)
+    run_6_summary(cfg)
 
     elapsed = time.perf_counter() - t0
     print(f"\n{'═' * 70}")
