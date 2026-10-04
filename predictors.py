@@ -33,9 +33,18 @@ class ArithmeticTrackingPredictor(Predictor):
             return 0.0
         return float(history[-1])
 
-    def update(self, x_true: float, x_hat: float) -> None:
+    def update(self, x_true: float, x_hat: float, lsb: Optional[float] = None) -> None:
         # Aktivität wird über die absolute Differenz zum Vorwert erfasst.
         self._recent_diffs.append(abs(x_true - x_hat))
+        if lsb is not None:
+            # Anbindung an SARConverter: die anhand der gleitenden
+            # Signalaktivität geschätzte Fenstergröße wird über den in
+            # Predictor definierten Override-Mechanismus
+            # (SARConverter.convert() liest getattr(self.predictor,
+            # "max_search_bits", None)) für den jeweils *nächsten*
+            # Abtastwert wirksam gemacht. Dies ersetzt das zuvor global
+            # statische SARConfig.max_search_bits für diesen Prädiktor.
+            self.max_search_bits = self.suggested_search_bits(lsb)
 
     def suggested_search_bits(self, lsb: float) -> int:
         # Schätzt die Anzahl benötigter Suchbits anhand der jüngsten Signalaktivität
@@ -77,10 +86,15 @@ class LinearPredictor(Predictor):
             return 0.0
         if history.size < self.order:
             return float(history[-1])  # Fallback bei zu kurzer Historie
+        # KORREKTUR: Reversierung [::-1] fehlt. Die Historienelemente werden falsch herum mit den Koeffizienten gewichtet.
         recent = history[-self.order:][::-1]  # [x[n-1], x[n-2], ..., x[n-p]]
         return float(np.dot(self.coeffs, recent))
 
-    def update(self, x_true: float, x_hat: float) -> None:
+    def update(self, x_true: float, x_hat: float, lsb: Optional[float] = None) -> None:
+        # lsb wird von SARConverter.convert() an jeden Prädiktor übergeben,
+        # ist für die LMS-Koeffizientenanpassung von AR(2) jedoch nicht
+        # relevant und wird hier nicht verwendet; das Suchfenster dieses
+        # Prädiktors bleibt unverändert beim globalen SARConfig-Default.
         if not self.adaptive:
             return None
         error = x_true - x_hat
